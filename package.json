@@ -1,14 +1,30 @@
 {
+  "name": "dark-archive",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "vite --host 0.0.0.0",
+    "dev:server": "node --env-file-if-exists=.env server/index.js",
     "build": "vite build",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "db:migrate": "node --env-file-if-exists=.env scripts/migrate.mjs",
+    "admin:create": "node --env-file-if-exists=.env scripts/create-admin.mjs",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "@electric-sql/pglite": "^0.3.14",
+    "pg": "^8.16.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "vite": "^7.1.9"
+  }
 }

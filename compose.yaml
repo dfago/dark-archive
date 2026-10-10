@@ -1,0 +1,28 @@
+services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: archive
+      POSTGRES_DB: archive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archive -d archive"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  web:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://archive:${POSTGRES_PASSWORD}@database:5432/archive
+      SITE_URL: ${SITE_URL:-http://localhost:3001}
+      NODE_ENV: production
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  postgres_data:

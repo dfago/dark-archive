@@ -1,628 +1,833 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  api,
+  readLocal,
+  writeLocal,
+  guestProgress,
+  formatDate,
+  downloadJSON,
+} from "./api.js";
+import { starterArticles } from "./starter-articles.js";
+import { Link } from "./components/Link.jsx";
+import Reader from "./components/Reader.jsx";
+import Admin from "./components/Admin.jsx";
 import "./styles.css";
 
-const starterArticles = [
-  {
-    id: 1,
-    title: "Дело №731Б: Мёртвый хутор",
-    slug: "delo-731b-mertvyi-hutor",
-    excerpt:
-      "Старая архивная папка без подписи. Деревня, которой нет на картах. И женщина, не отражавшаяся в зеркале.",
-    date: "2026-04-24",
-    status: "published",
-    cover:
-      "https://images.unsplash.com/photo-1516410529446-2c777cb7366d?q=80&w=1600&auto=format&fit=crop",
-    content: `В архивах бывшего КГБ на самой пыльной, самой дальней полке до сих пор хранится тонкая папка из серого картона.
-
-На ней нет никаких опознавательных знаков. Только номер, нанесённый карандашом.
-
-Дело №731Б.
-
-Официально его не существует.
-
-Но если открыть первую страницу, становится ясно: кто-то очень старался, чтобы об этом хуторе больше никогда не вспоминали.`
-  },
-  {
-    id: 2,
-    title: "Станция, которой нет",
-    slug: "stanciya-kotoroi-net",
-    excerpt:
-      "Ночная смена в метро. Платформа без названия. И поезд, который приходит только для тех, кого уже не ждут.",
-    date: "2026-04-22",
-    status: "published",
-    cover:
-      "https://images.unsplash.com/photo-1519608487953-e999c86e7455?q=80&w=1600&auto=format&fit=crop",
-    content: `Первый раз я увидел эту станцию в 02:17.
-
-По графику её не было.
-
-На схеме — тоже.
-
-Но поезд замедлил ход, двери раскрылись, и из тёмного тоннеля потянуло холодом, которого в московском метро быть не должно.`
-  }
-];
-
-function readStorage(key, fallback) {
+function legacyArticles() {
+  const saved = readLocal("articles", starterArticles);
+  if (!Array.isArray(saved)) return starterArticles;
+  return saved
+    .filter(
+      (a) =>
+        a &&
+        a.status === "published" &&
+        typeof a.title === "string" &&
+        typeof a.content === "string" &&
+        typeof a.slug === "string",
+    )
+    .map((a) => ({ ...a, id: String(a.id), likeCount: 0, liked: false }));
+}
+function pathNow() {
   try {
-    const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : fallback;
+    return decodeURI(window.location.pathname);
   } catch {
-    return fallback;
+    return "/";
   }
 }
-
-function saveStorage(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
-
-function formatDate(date) {
-  return new Date(date).toLocaleDateString("ru-RU", {
-    day: "2-digit",
-    month: "long",
-    year: "numeric"
-  });
-}
-
-function slugify(text) {
-  return text
-    .toLowerCase()
-    .replace(/ё/g, "e")
-    .replace(/[^a-zа-я0-9]+/gi, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
 function App() {
-  const [articles, setArticles] = useState(() => readStorage("articles", starterArticles));
-  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
-  const [view, setView] = useState("home");
-  const [selectedArticle, setSelectedArticle] = useState(null);
+  const [path, setPath] = useState(pathNow);
+  const [theme, setTheme] = useState(() => readLocal("archive:theme", "dark"));
+  const [user, setUser] = useState(null);
+  const [online, setOnline] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [catalog, setCatalog] = useState({ articles: [], series: [] });
+  const [library, setLibrary] = useState([]);
   const [search, setSearch] = useState("");
-
-  const [admin, setAdmin] = useState(() => readStorage("admin", false));
-  const [adminLogin, setAdminLogin] = useState({ username: "", password: "" });
-
-  const [users, setUsers] = useState(() => readStorage("users", []));
-  const [currentUser, setCurrentUser] = useState(() => readStorage("currentUser", null));
-  const [readerLogin, setReaderLogin] = useState({ name: "", password: "" });
-
-  const [likes, setLikes] = useState(() => readStorage("likes", {}));
-  const [comments, setComments] = useState(() => readStorage("comments", {}));
-  const [collections, setCollections] = useState(() => readStorage("collections", {}));
-  const [commentText, setCommentText] = useState("");
-
-  const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState({
-    title: "",
-    excerpt: "",
-    cover: "",
-    content: "",
-    status: "draft"
+  const [revision, setRevision] = useState(0);
+  const [toast, setToast] = useState("");
+  const toastTimer = useRef(null);
+  const actionLocks = useRef(new Set());
+  const fallbackArticles = useMemo(legacyArticles, []);
+  const [guestBookmarks, setGuestBookmarks] = useState(() => {
+    const v = readLocal("archive:bookmarks", []);
+    return Array.isArray(v) ? v.map(String) : [];
   });
-
-  useEffect(() => saveStorage("articles", articles), [articles]);
-  useEffect(() => localStorage.setItem("theme", theme), [theme]);
-  useEffect(() => saveStorage("admin", admin), [admin]);
-  useEffect(() => saveStorage("users", users), [users]);
-  useEffect(() => saveStorage("currentUser", currentUser), [currentUser]);
-  useEffect(() => saveStorage("likes", likes), [likes]);
-  useEffect(() => saveStorage("comments", comments), [comments]);
-  useEffect(() => saveStorage("collections", collections), [collections]);
-
-  const isDark = theme === "dark";
-
-  const publishedArticles = useMemo(() => {
-    return articles
-      .filter((article) => article.status === "published")
-      .filter((article) =>
-        `${article.title} ${article.excerpt}`.toLowerCase().includes(search.toLowerCase())
-      )
-      .sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [articles, search]);
-
-  const userCollection = currentUser ? collections[currentUser.id] || [] : [];
-
-  function openArticle(article) {
-    setSelectedArticle(article);
-    setCommentText("");
-    setView("article");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  function notify(message) {
+    setToast(message);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 6000);
   }
-
-  function resetForm() {
-    setEditingId(null);
-    setForm({ title: "", excerpt: "", cover: "", content: "", status: "draft" });
+  function navigate(to) {
+    if (to !== window.location.pathname) history.pushState(null, "", to);
+    setPath(pathNow());
+    window.scrollTo({ top: 0, behavior: "instant" });
   }
-
-  function handleAdminLogin(event) {
-    event.preventDefault();
-    if (adminLogin.username === "admin" && adminLogin.password === "1234") {
-      setAdmin(true);
-      setView("admin");
-      return;
+  useEffect(() => {
+    const pop = () => {
+      setPath(pathNow());
+      window.scrollTo({ top: 0, behavior: "instant" });
+    };
+    window.addEventListener("popstate", pop);
+    return () => {
+      window.removeEventListener("popstate", pop);
+      clearTimeout(toastTimer.current);
+    };
+  }, []);
+  useEffect(() => {
+    writeLocal("archive:theme", theme);
+    document.documentElement.dataset.theme = theme;
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", theme === "light" ? "#f5f1e8" : "#09090b");
+  }, [theme]);
+  useEffect(() => {
+    // Discard obsolete credentials and client-side administrator flags.
+    for (const key of ["admin", "users", "currentUser"]) {
+      try {
+        localStorage.removeItem(key);
+      } catch {}
     }
-    alert("Демо-вход администратора: admin / 1234");
-  }
-
-  function handleReaderLogin(event) {
-    event.preventDefault();
-
-    const name = readerLogin.name.trim();
-    const password = readerLogin.password;
-
-    if (!name) {
-      alert("Напиши имя или ник");
-      return;
-    }
-
-    const existingUser = users.find((user) => user.name.toLowerCase() === name.toLowerCase());
-
-    if (existingUser) {
-      if (existingUser.password !== password) {
-        alert("Пароль не совпадает");
-        return;
-      }
-      setCurrentUser(existingUser);
-    } else {
-      const newUser = {
-        id: Date.now(),
-        name,
-        password,
-        createdAt: new Date().toISOString()
-      };
-      setUsers((prev) => [...prev, newUser]);
-      setCurrentUser(newUser);
-    }
-
-    setReaderLogin({ name: "", password: "" });
-    setView("home");
-  }
-
-  function needUser(actionName) {
-    if (!currentUser) {
-      alert(`${actionName} доступны после простой регистрации`);
-      setView("reader-login");
-      return true;
-    }
-    return false;
-  }
-
-  function toggleLike(articleId) {
-    if (needUser("Лайки")) return;
-
-    setLikes((prev) => {
-      const articleLikes = prev[articleId] || [];
-      const exists = articleLikes.includes(currentUser.id);
-
-      return {
-        ...prev,
-        [articleId]: exists
-          ? articleLikes.filter((id) => id !== currentUser.id)
-          : [...articleLikes, currentUser.id]
-      };
-    });
-  }
-
-  function toggleCollection(articleId) {
-    if (needUser("Подборки")) return;
-
-    setCollections((prev) => {
-      const saved = prev[currentUser.id] || [];
-      const exists = saved.includes(articleId);
-
-      return {
-        ...prev,
-        [currentUser.id]: exists
-          ? saved.filter((id) => id !== articleId)
-          : [...saved, articleId]
-      };
-    });
-  }
-
-  function addComment(articleId) {
-    if (needUser("Комментарии")) return;
-
-    const text = commentText.trim();
-    if (!text) return;
-
-    setComments((prev) => ({
-      ...prev,
-      [articleId]: [
-        ...(prev[articleId] || []),
-        {
-          id: Date.now(),
-          author: currentUser.name,
-          text,
-          date: new Date().toISOString()
-        }
-      ]
-    }));
-
-    setCommentText("");
-  }
-
-  function saveArticle(event) {
-    event.preventDefault();
-
-    if (!form.title.trim() || !form.content.trim()) {
-      alert("Добавь хотя бы заголовок и текст статьи");
-      return;
-    }
-
-    if (editingId) {
-      setArticles((prev) =>
-        prev.map((article) =>
-          article.id === editingId
-            ? {
-                ...article,
-                title: form.title,
-                slug: slugify(form.title),
-                excerpt: form.excerpt,
-                cover: form.cover,
-                content: form.content,
-                status: form.status
-              }
-            : article
-        )
-      );
-    } else {
-      setArticles((prev) => [
-        {
-          id: Date.now(),
-          title: form.title,
-          slug: slugify(form.title),
-          excerpt: form.excerpt,
-          cover:
-            form.cover ||
-            "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=1600&auto=format&fit=crop",
-          content: form.content,
-          status: form.status,
-          date: new Date().toISOString().slice(0, 10)
-        },
-        ...prev
+    refresh();
+  }, []);
+  async function refresh() {
+    try {
+      const [session, nextCatalog] = await Promise.all([
+        api("/session"),
+        api("/catalog"),
       ]);
+      setUser(session.user);
+      setCatalog(nextCatalog);
+      setOnline(true);
+      if (session.user) {
+        try {
+          setLibrary((await api("/me/library")).articles);
+        } catch {
+          notify("Не удалось загрузить библиотеку. Повторите позже.");
+        }
+      } else setLibrary([]);
+    } catch {
+      setOnline(false);
+      setUser(null);
+      setCatalog({ articles: fallbackArticles, series: [] });
+    } finally {
+      setLoading(false);
     }
-
-    resetForm();
   }
-
-  function editArticle(article) {
-    setEditingId(article.id);
-    setForm({
-      title: article.title,
-      excerpt: article.excerpt,
-      cover: article.cover,
-      content: article.content,
-      status: article.status
+  useEffect(() => {
+    const story = path.startsWith("/story/")
+      ? catalog.articles.find((a) => a.slug === path.slice(7))
+      : null;
+    document.title = story
+      ? `${story.title} — Тёмный архив`
+      : path === "/library"
+        ? "Моя библиотека — Тёмный архив"
+        : "Тёмный архив — истории, которые не отпускают";
+    document
+      .querySelector('meta[name="description"]')
+      ?.setAttribute(
+        "content",
+        story?.excerpt ||
+          "Мистические рассказы Артёма: советские экспедиции, славянский фольклор и места, которых нет на картах.",
+      );
+  }, [path, catalog]);
+  function updateArticle(id, patch) {
+    setCatalog((previous) => ({
+      ...previous,
+      articles: previous.articles.map((a) =>
+        a.id === id ? { ...a, ...patch } : a,
+      ),
+    }));
+    setLibrary((previous) =>
+      previous.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    );
+  }
+  function updateProgress(article, position) {
+    setLibrary((previous) => {
+      const entry = {
+        ...article,
+        ...position,
+        lastReadAt: new Date().toISOString(),
+      };
+      return previous.some((a) => a.id === article.id)
+        ? previous.map((a) => (a.id === article.id ? { ...a, ...entry } : a))
+        : [...previous, entry];
     });
-    setView("admin");
-    window.scrollTo({ top: 0, behavior: "smooth" });
   }
-
-  function deleteArticle(id) {
-    if (!confirm("Удалить статью?")) return;
-    setArticles((prev) => prev.filter((article) => article.id !== id));
-    resetForm();
+  async function toggleAction(article, kind) {
+    const key = `${article.id}:${kind}`;
+    if (actionLocks.current.has(key)) return null;
+    if (kind === "bookmark" && !user) {
+      const active = !guestBookmarks.includes(article.id);
+      const next = active
+        ? [...guestBookmarks, article.id]
+        : guestBookmarks.filter((id) => id !== article.id);
+      setGuestBookmarks(next);
+      writeLocal("archive:bookmarks", next);
+      updateArticle(article.id, { bookmarked: active });
+      notify(
+        active
+          ? "Сохранено в закладки на этом устройстве."
+          : "Закладка удалена.",
+      );
+      return { bookmarked: active };
+    }
+    if (!online) {
+      notify("Это действие временно недоступно. Можно продолжить читать.");
+      return null;
+    }
+    if (!user) {
+      navigate("/login");
+      return null;
+    }
+    const field = kind === "like" ? "liked" : "bookmarked";
+    actionLocks.current.add(key);
+    try {
+      const result = await api(`/articles/${article.id}/${kind}`, {
+        method: "PUT",
+        body: { active: !article[field] },
+      });
+      const patch = { [field]: result.active, likeCount: result.likeCount };
+      updateArticle(article.id, patch);
+      if (kind === "bookmark") setLibrary((await api("/me/library")).articles);
+      return patch;
+    } catch (error) {
+      notify(error.message);
+      return null;
+    } finally {
+      actionLocks.current.delete(key);
+    }
   }
-
+  async function logout() {
+    try {
+      await api("/auth/logout", { method: "POST" });
+      setUser(null);
+      setLibrary([]);
+      await refresh();
+      navigate("/");
+    } catch (error) {
+      notify(error.message);
+    }
+  }
+  async function signedIn(nextUser) {
+    setUser(nextUser);
+    // Move this device's guest bookmarks to the account, without deleting the backup.
+    const saved = guestBookmarks.filter((id) =>
+      catalog.articles.some((a) => a.id === id),
+    );
+    await Promise.allSettled(
+      saved.map((id) =>
+        api(`/articles/${id}/bookmark`, {
+          method: "PUT",
+          body: { active: true },
+        }),
+      ),
+    );
+    await refresh();
+    navigate("/");
+  }
+  const articles = catalog.articles.map((a) => ({
+    ...a,
+    bookmarked: user ? a.bookmarked : guestBookmarks.includes(a.id),
+  }));
+  const filtered = articles.filter((a) =>
+    `${a.title} ${a.excerpt} ${a.seriesTitle || ""}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase()),
+  );
+  const guestLibrary = articles
+    .filter((a) => a.bookmarked || guestProgress(a.id))
+    .map((a) => ({ ...a, ...guestProgress(a.id) }));
+  const myLibrary = user ? library : guestLibrary;
+  const recent = [...myLibrary]
+    .filter((a) => a.percent > 0 && a.percent < 100)
+    .sort((a, b) => new Date(b.lastReadAt) - new Date(a.lastReadAt))[0];
+  const seriesSlug = path.startsWith("/series/") ? path.slice(8) : null;
+  const series = catalog.series.find((s) => s.slug === seriesSlug);
+  const seriesArticles = articles
+    .filter((a) => a.seriesSlug === seriesSlug)
+    .sort((a, b) => a.episode - b.episode);
+  const card = (article) => (
+    <article className="card" key={article.id}>
+      <Link
+        to={`/story/${article.slug}`}
+        navigate={navigate}
+        className="cover-link"
+        aria-label={`Читать ${article.title}`}
+      >
+        {article.cover ? (
+          <img loading="lazy" src={article.cover} alt="" />
+        ) : (
+          <div className="cover-placeholder">ТЁМНЫЙ АРХИВ</div>
+        )}
+      </Link>
+      <div className="card-body">
+        <div className="article-meta">
+          <span>{formatDate(article.date)}</span>
+          <span>
+            {article.readMinutes ||
+              Math.max(
+                1,
+                Math.ceil((article.content?.length || 1000) / 1000),
+              )}{" "}
+            мин чтения
+          </span>
+        </div>
+        {article.seriesTitle && (
+          <Link
+            to={`/series/${article.seriesSlug}`}
+            navigate={navigate}
+            className="series-label"
+          >
+            {article.seriesTitle} · часть {article.episode}
+          </Link>
+        )}
+        <h2>
+          <Link to={`/story/${article.slug}`} navigate={navigate}>
+            {article.title}
+          </Link>
+        </h2>
+        <p>{article.excerpt}</p>
+        {article.percent > 0 && (
+          <div
+            className="progress-track"
+            aria-label={`Прочитано ${article.percent}%`}
+          >
+            <span style={{ width: `${article.percent}%` }} />
+          </div>
+        )}
+        <div className="card-actions">
+          <Link
+            className="accent-button"
+            to={`/story/${article.slug}`}
+            navigate={navigate}
+          >
+            {article.percent > 0 && article.percent < 100
+              ? `Продолжить · ${article.percent}%`
+              : "Читать историю"}
+          </Link>
+          <button
+            aria-label={`Нравится: ${article.likeCount || 0}`}
+            aria-pressed={Boolean(article.liked)}
+            onClick={() => toggleAction(article, "like")}
+          >
+            ♥ {article.likeCount || 0}
+          </button>
+          <button
+            aria-pressed={Boolean(article.bookmarked)}
+            onClick={() => toggleAction(article, "bookmark")}
+          >
+            {article.bookmarked ? "✓ Закладка" : "+ Закладка"}
+          </button>
+        </div>
+      </div>
+    </article>
+  );
   return (
-    <div className={`app ${isDark ? "theme-dark" : "theme-light"}`}>
+    <div className={`app theme-${theme === "light" ? "light" : "dark"}`}>
+      <a href="#main" className="skip-link">
+        Перейти к содержимому
+      </a>
       <header className="site-header">
-        <button className="logo" onClick={() => setView("home")}>
+        <Link to="/" navigate={navigate} className="logo">
           <span>АРХИВНЫЕ ИСТОРИИ</span>
           <strong>Тёмный архив</strong>
-        </button>
-
-        <nav className="nav">
-          <button onClick={() => setTheme(isDark ? "light" : "dark")}>
-            {isDark ? "☀ Светлая" : "🌙 Тёмная"}
+        </Link>
+        <nav className="nav" aria-label="Главная навигация">
+          <Link
+            to="/"
+            navigate={navigate}
+            aria-current={path === "/" ? "page" : undefined}
+          >
+            Истории
+          </Link>
+          <Link
+            to="/series"
+            navigate={navigate}
+            aria-current={path.startsWith("/series") ? "page" : undefined}
+          >
+            Серии
+          </Link>
+          <Link
+            to="/library"
+            navigate={navigate}
+            aria-current={path === "/library" ? "page" : undefined}
+          >
+            Моя библиотека
+          </Link>
+          <button
+            aria-label={
+              theme === "dark"
+                ? "Включить светлую тему"
+                : "Включить тёмную тему"
+            }
+            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+          >
+            {theme === "light" ? "☾" : "☀"}
           </button>
-          <button onClick={() => setView("home")}>Статьи</button>
-
-          {currentUser ? (
+          {user ? (
             <>
-              <button onClick={() => setView("collections")}>Моя подборка</button>
-              <button onClick={() => setCurrentUser(null)}>Выйти: {currentUser.name}</button>
+              <button onClick={logout}>Выйти · {user.name}</button>
+              {user.role === "admin" && (
+                <Link
+                  className="accent-button"
+                  to="/author"
+                  navigate={navigate}
+                >
+                  Кабинет автора
+                </Link>
+              )}
             </>
           ) : (
-            <button onClick={() => setView("reader-login")}>👤 Регистрация</button>
-          )}
-
-          {admin ? (
-            <>
-              <button className="accent-button" onClick={() => setView("admin")}>
-                Админка
-              </button>
-              <button onClick={() => setAdmin(false)}>⎋</button>
-            </>
-          ) : (
-            <button onClick={() => setView("admin-login")}>🔒 Админ</button>
+            <Link to="/login" navigate={navigate}>
+              Войти
+            </Link>
           )}
         </nav>
       </header>
-
-      <main className="container">
-        {view === "home" && (
+      <main id="main" className="container">
+        {loading ? (
+          <p className="empty-state" role="status">
+            Открываем архив…
+          </p>
+        ) : (
           <>
-            <section className="hero">
-              <span className="eyebrow">личный блог</span>
-              <h1>Мистические истории, секретные папки и дела, которых не было.</h1>
-              <p>
-                Здесь можно публиковать статьи из Дзена, хранить серии и собирать свою аудиторию
-                без зависимости от алгоритмов.
-              </p>
-
-              <input
-                className="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Поиск по статьям..."
-              />
-            </section>
-
-            <section className="article-grid">
-              {publishedArticles.map((article) => (
-                <article className="card" key={article.id}>
-                  <img src={article.cover} alt="" />
-                  <div className="card-body">
-                    <span className="date">📅 {formatDate(article.date)}</span>
-                    <h2>{article.title}</h2>
-                    <p>{article.excerpt}</p>
-
-                    <div className="card-actions">
-                      <button className="accent-button" onClick={() => openArticle(article)}>
-                        Читать
-                      </button>
-                      <button onClick={() => toggleLike(article.id)}>
-                        ❤ {(likes[article.id] || []).length}
-                      </button>
-                      <button onClick={() => toggleCollection(article.id)}>
-                        {userCollection.includes(article.id) ? "✓ В подборке" : "＋ Подборка"}
-                      </button>
-                    </div>
+            {!online && (
+              <div className="service-banner" role="status">
+                Архив открыт для чтения. Вход и обсуждения временно недоступны.
+                <button onClick={refresh}>Проверить соединение</button>
+              </div>
+            )}
+            {path === "/" && (
+              <>
+                <section className="hero">
+                  <span className="eyebrow">рассказы Артёма</span>
+                  <h1>
+                    Есть истории,
+                    <br />
+                    которые не отпускают.
+                  </h1>
+                  <p>
+                    Забытые деревни. Советские экспедиции. Старые поверья, в
+                    которых оказалось слишком много правды.
+                  </p>
+                  <div className="hero-actions">
+                    <a href="#stories" className="accent-button">
+                      Открыть архив ↓
+                    </a>
+                    <a
+                      href="https://dzen.ru/dfago2005"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      Читать в Дзене ↗
+                    </a>
                   </div>
-                </article>
-              ))}
-            </section>
-          </>
-        )}
-
-        {view === "article" && selectedArticle && (
-          <article className="article-page">
-            <button className="back-button" onClick={() => setView("home")}>
-              ← Назад к статьям
-            </button>
-
-            <div className="article-shell">
-              <img className="article-cover" src={selectedArticle.cover} alt="" />
-
-              <div className="article-content">
-                <span className="date">📅 {formatDate(selectedArticle.date)}</span>
-                <h1>{selectedArticle.title}</h1>
-
-                <div className="reader-text">
-                  {selectedArticle.content.split("\n").map((paragraph, index) =>
-                    paragraph.trim() ? <p key={index}>{paragraph}</p> : null
+                </section>
+                {recent && (
+                  <section className="continue-card">
+                    <div>
+                      <span className="eyebrow">вы уже начали</span>
+                      <h2>{recent.title}</h2>
+                      <span className="muted">Прочитано {recent.percent}%</span>
+                    </div>
+                    <Link
+                      to={`/story/${recent.slug}`}
+                      navigate={navigate}
+                      className="accent-button"
+                    >
+                      Продолжить чтение →
+                    </Link>
+                  </section>
+                )}
+                <section id="stories">
+                  <div className="section-heading">
+                    <div>
+                      <h2>Истории из архива</h2>
+                      <p className="muted">
+                        Отдельные рассказы и новые части серий.
+                      </p>
+                    </div>
+                    <label className="search-label">
+                      <span className="sr-only">Поиск по историям</span>
+                      <input
+                        type="search"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Найти историю…"
+                      />
+                    </label>
+                  </div>
+                  {filtered.length ? (
+                    <div className="article-grid">{filtered.map(card)}</div>
+                  ) : (
+                    <div className="empty-state">
+                      <h3>Ничего не нашлось</h3>
+                      <p>
+                        Попробуйте другое название или уберите часть запроса.
+                      </p>
+                    </div>
                   )}
-                </div>
-
-                <div className="social-panel">
-                  <button className="accent-button" onClick={() => toggleLike(selectedArticle.id)}>
-                    ❤ Нравится: {(likes[selectedArticle.id] || []).length}
-                  </button>
-                  <button onClick={() => toggleCollection(selectedArticle.id)}>
-                    {userCollection.includes(selectedArticle.id)
-                      ? "✓ Уже в подборке"
-                      : "＋ В мою подборку"}
-                  </button>
-                </div>
-
-                <section className="comments">
-                  <h2>Комментарии</h2>
-
-                  {!currentUser && (
-                    <p className="muted">
-                      Читать можно без регистрации. Комментарии, лайки и подборки доступны после
-                      простого входа.
-                    </p>
-                  )}
-
-                  <div className="comment-list">
-                    {(comments[selectedArticle.id] || []).length === 0 && (
-                      <p className="muted">Пока комментариев нет.</p>
-                    )}
-
-                    {(comments[selectedArticle.id] || []).map((comment) => (
-                      <div className="comment" key={comment.id}>
-                        <strong>{comment.author}</strong>
-                        <span>{formatDate(comment.date)}</span>
-                        <p>{comment.text}</p>
-                      </div>
+                </section>
+              </>
+            )}
+            {path.startsWith("/story/") && (
+              <Reader
+                slug={path.slice(7)}
+                online={online}
+                fallbackArticles={articles}
+                user={user}
+                navigate={navigate}
+                notify={notify}
+                toggleAction={toggleAction}
+                onProgress={updateProgress}
+                revision={revision}
+              />
+            )}
+            {path === "/series" && (
+              <section>
+                <span className="eyebrow">истории с продолжением</span>
+                <h1>Серии архива</h1>
+                <p className="muted">Все части собраны в порядке чтения.</p>
+                {catalog.series.length ? (
+                  <div className="series-grid">
+                    {catalog.series.map((s) => (
+                      <Link
+                        key={s.id}
+                        className="series-card"
+                        to={`/series/${s.slug}`}
+                        navigate={navigate}
+                      >
+                        <span className="eyebrow">{s.episodeCount} частей</span>
+                        <h2>{s.title}</h2>
+                        <p>{s.description}</p>
+                        <span>Открыть серию →</span>
+                      </Link>
                     ))}
                   </div>
-
-                  <textarea
-                    value={commentText}
-                    onChange={(event) => setCommentText(event.target.value)}
-                    placeholder="Написать комментарий..."
-                    rows={4}
-                  />
-
-                  <button className="accent-button" onClick={() => addComment(selectedArticle.id)}>
-                    Отправить комментарий
-                  </button>
-                </section>
-              </div>
-            </div>
-          </article>
-        )}
-
-        {view === "collections" && currentUser && (
-          <section>
-            <h1>Моя подборка</h1>
-
-            <div className="article-grid">
-              {articles
-                .filter((article) => userCollection.includes(article.id))
-                .map((article) => (
-                  <article className="card" key={article.id}>
-                    <img src={article.cover} alt="" />
-                    <div className="card-body">
-                      <h2>{article.title}</h2>
-                      <p>{article.excerpt}</p>
-                      <button className="accent-button" onClick={() => openArticle(article)}>
-                        Читать
-                      </button>
-                    </div>
-                  </article>
-                ))}
-            </div>
-
-            {userCollection.length === 0 && (
-              <p className="muted">Ты пока ничего не добавил в подборку.</p>
-            )}
-          </section>
-        )}
-
-        {view === "reader-login" && (
-          <section className="form-card">
-            <h1>Формальная регистрация</h1>
-            <p className="muted">
-              Нужна только для лайков, комментариев и личных подборок. Для чтения регистрация не
-              требуется.
-            </p>
-
-            <form onSubmit={handleReaderLogin}>
-              <input
-                value={readerLogin.name}
-                onChange={(event) =>
-                  setReaderLogin({ ...readerLogin, name: event.target.value })
-                }
-                placeholder="Имя или ник"
-              />
-              <input
-                type="password"
-                value={readerLogin.password}
-                onChange={(event) =>
-                  setReaderLogin({ ...readerLogin, password: event.target.value })
-                }
-                placeholder="Пароль"
-              />
-              <button className="accent-button">Войти или зарегистрироваться</button>
-            </form>
-          </section>
-        )}
-
-        {view === "admin-login" && (
-          <section className="form-card">
-            <h1>Вход администратора</h1>
-            <p className="muted">Демо-вход: admin / 1234</p>
-
-            <form onSubmit={handleAdminLogin}>
-              <input
-                value={adminLogin.username}
-                onChange={(event) =>
-                  setAdminLogin({ ...adminLogin, username: event.target.value })
-                }
-                placeholder="Логин"
-              />
-              <input
-                type="password"
-                value={adminLogin.password}
-                onChange={(event) =>
-                  setAdminLogin({ ...adminLogin, password: event.target.value })
-                }
-                placeholder="Пароль"
-              />
-              <button className="accent-button">Войти</button>
-            </form>
-          </section>
-        )}
-
-        {view === "admin" && admin && (
-          <section className="admin-grid">
-            <div className="form-card admin-form">
-              <h1>Панель администратора</h1>
-              <p className="muted">Добавление, черновики и публикация статей.</p>
-
-              <form onSubmit={saveArticle}>
-                <input
-                  value={form.title}
-                  onChange={(event) => setForm({ ...form, title: event.target.value })}
-                  placeholder="Название статьи"
-                />
-                <textarea
-                  value={form.excerpt}
-                  onChange={(event) => setForm({ ...form, excerpt: event.target.value })}
-                  placeholder="Короткое описание"
-                  rows={3}
-                />
-                <input
-                  value={form.cover}
-                  onChange={(event) => setForm({ ...form, cover: event.target.value })}
-                  placeholder="Ссылка на обложку"
-                />
-                <textarea
-                  value={form.content}
-                  onChange={(event) => setForm({ ...form, content: event.target.value })}
-                  placeholder="Текст статьи"
-                  rows={14}
-                />
-                <select
-                  value={form.status}
-                  onChange={(event) => setForm({ ...form, status: event.target.value })}
-                >
-                  <option value="draft">Черновик</option>
-                  <option value="published">Опубликовано</option>
-                </select>
-
-                <button className="accent-button">
-                  {editingId ? "Сохранить изменения" : "Добавить статью"}
-                </button>
-                {editingId && <button type="button" onClick={resetForm}>Новая статья</button>}
-              </form>
-            </div>
-
-            <div className="form-card">
-              <h2>Все статьи</h2>
-
-              <div className="admin-list">
-                {articles.map((article) => (
-                  <div className="admin-item" key={article.id}>
-                    <div>
-                      <span className="muted">
-                        {article.status === "published" ? "Опубликовано" : "Черновик"}
-                      </span>
-                      <strong>{article.title}</strong>
-                    </div>
-
-                    <div className="admin-actions">
-                      <button onClick={() => editArticle(article)}>✎</button>
-                      <button onClick={() => deleteArticle(article.id)}>×</button>
-                    </div>
+                ) : (
+                  <div className="empty-state">
+                    <h2>Серии скоро появятся</h2>
+                    <p>Пока можно выбрать отдельный рассказ в архиве.</p>
+                    <Link to="/" navigate={navigate}>
+                      К историям →
+                    </Link>
                   </div>
-                ))}
-              </div>
-            </div>
-          </section>
-        )}
-
-        {view === "admin" && !admin && (
-          <section className="form-card">
-            <h1>Нужен вход администратора</h1>
-            <button className="accent-button" onClick={() => setView("admin-login")}>
-              Войти
-            </button>
-          </section>
+                )}
+              </section>
+            )}
+            {seriesSlug && (
+              <section>
+                <Link to="/series" navigate={navigate} className="back-link">
+                  ← Все серии
+                </Link>
+                <h1>{series?.title || "Серия не найдена"}</h1>
+                <p className="muted">{series?.description}</p>
+                <div className="article-grid">{seriesArticles.map(card)}</div>
+              </section>
+            )}
+            {path === "/library" && (
+              <section>
+                <span className="eyebrow">сохранённое и начатое</span>
+                <h1>Моя библиотека</h1>
+                <p className="muted">
+                  {user
+                    ? "Закладки и место чтения доступны на любом устройстве после входа."
+                    : "Закладки и место чтения сохраняются на этом устройстве. Войдите, чтобы синхронизировать закладки."}
+                </p>
+                {myLibrary.length ? (
+                  <div className="article-grid">{myLibrary.map(card)}</div>
+                ) : (
+                  <div className="empty-state">
+                    <h2>Здесь будут ваши истории</h2>
+                    <p>Добавьте рассказ в закладки или начните читать.</p>
+                    <Link to="/" navigate={navigate}>
+                      Выбрать историю →
+                    </Link>
+                  </div>
+                )}
+              </section>
+            )}
+            {path === "/login" && (
+              <Login
+                online={online}
+                user={user}
+                signedIn={signedIn}
+                navigate={navigate}
+                notify={notify}
+              />
+            )}
+            {path === "/author" &&
+              (user?.role === "admin" ? (
+                <Admin
+                  notify={notify}
+                  refresh={async () => {
+                    await refresh();
+                    setRevision((v) => v + 1);
+                  }}
+                  navigate={navigate}
+                />
+              ) : (
+                <section className="empty-state">
+                  <h1>Кабинет автора</h1>
+                  <p>Войдите под аккаунтом автора.</p>
+                  <Link to="/login" navigate={navigate}>
+                    Войти
+                  </Link>
+                </section>
+              ))}
+            {path === "/feedback" && (
+              <Feedback
+                user={user}
+                online={online}
+                notify={notify}
+                navigate={navigate}
+              />
+            )}
+            {![
+              "/",
+              "/series",
+              "/library",
+              "/login",
+              "/author",
+              "/feedback",
+            ].includes(path) &&
+              !path.startsWith("/story/") &&
+              !seriesSlug && (
+                <section className="empty-state">
+                  <h1>Такого дела в архиве нет</h1>
+                  <Link to="/" navigate={navigate}>
+                    На главную
+                  </Link>
+                </section>
+              )}
+          </>
         )}
       </main>
-
       <footer className="footer">
-        <span>© 2026 Тёмный архив</span>
-        <span>robots.txt · sitemap.xml · SEO · мобильная версия</span>
+        <div>
+          <strong>Тёмный архив</strong>
+          <span>
+            Авторские мистические рассказы · © {new Date().getFullYear()}
+          </span>
+        </div>
+        <div>
+          <Link to="/feedback" navigate={navigate}>
+            Написать автору
+          </Link>
+          <a
+            href="https://dzen.ru/dfago2005"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Канал в Дзене ↗
+          </a>
+          {readLocal("articles", null) && (
+            <button
+              onClick={() =>
+                downloadJSON("dark-archive-device-backup.json", {
+                  articles: readLocal("articles", []),
+                })
+              }
+            >
+              Скачать статьи с устройства
+            </button>
+          )}
+        </div>
       </footer>
+      {toast && (
+        <div className="toast" role="status">
+          <span>{toast}</span>
+          <button aria-label="Закрыть уведомление" onClick={() => setToast("")}>
+            ×
+          </button>
+        </div>
+      )}
     </div>
   );
 }
-
+function Login({ online, user, signedIn, navigate, notify }) {
+  const [register, setRegister] = useState(false);
+  const [form, setForm] = useState({ username: "", password: "", name: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api(register ? "/auth/register" : "/auth/login", {
+        method: "POST",
+        body: form,
+      });
+      await signedIn(result.user);
+      notify(register ? "Добро пожаловать в архив." : "Вы вошли в архив.");
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  if (user)
+    return (
+      <section className="empty-state">
+        <h1>Вы уже вошли, {user.name}</h1>
+        <Link to="/library" navigate={navigate}>
+          Открыть библиотеку
+        </Link>
+      </section>
+    );
+  return (
+    <section className="form-card auth-card">
+      <span className="eyebrow">свой уголок в архиве</span>
+      <h1>{register ? "Регистрация" : "С возвращением"}</h1>
+      <p className="muted">
+        Чтобы сохранять истории, продолжать чтение на другом устройстве и
+        обсуждать прочитанное.
+      </p>
+      <div className="auth-tabs">
+        <button
+          aria-pressed={!register}
+          onClick={() => {
+            setRegister(false);
+            setError("");
+          }}
+        >
+          Вход
+        </button>
+        <button
+          aria-pressed={register}
+          onClick={() => {
+            setRegister(true);
+            setError("");
+          }}
+        >
+          Регистрация
+        </button>
+      </div>
+      {!online ? (
+        <p>Вход временно недоступен. Истории можно читать без регистрации.</p>
+      ) : (
+        <form onSubmit={submit}>
+          {register && (
+            <label>
+              Как к вам обращаться
+              <input
+                autoComplete="nickname"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                minLength={2}
+                maxLength={60}
+                required
+              />
+            </label>
+          )}
+          <label>
+            Логин
+            <input
+              autoComplete="username"
+              value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value })}
+              minLength={3}
+              maxLength={40}
+              pattern="[a-zA-Zа-яА-ЯёЁ0-9_.\-]+"
+              required
+            />
+          </label>
+          <label>
+            Пароль
+            <input
+              type="password"
+              autoComplete={register ? "new-password" : "current-password"}
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+              minLength={10}
+              maxLength={128}
+              required
+            />
+          </label>
+          <p className="field-help">
+            Логин: от 3 символов. Пароль: от 10 символов.
+          </p>
+          {error && (
+            <p role="alert" className="form-error">
+              {error}
+            </p>
+          )}
+          <button className="accent-button" disabled={busy}>
+            {busy ? "Подождите…" : register ? "Создать аккаунт" : "Войти"}
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
+function Feedback({ user, online, notify, navigate }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  async function send(event) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await api("/feedback", { method: "POST", body: { text } });
+      setSent(true);
+      setText("");
+    } catch (error) {
+      notify(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="form-card">
+      <span className="eyebrow">обратная связь</span>
+      <h1>Написать Артёму</h1>
+      <p className="muted">
+        Предложить тему, поделиться своей историей или сообщить об ошибке.
+      </p>
+      {sent ? (
+        <p role="status">
+          Сообщение сохранено. Артём увидит его в кабинете автора.
+        </p>
+      ) : !online ? (
+        <p>
+          Форма временно недоступна. Можно оставить комментарий на{" "}
+          <a
+            href="https://dzen.ru/dfago2005"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            канале в Дзене
+          </a>
+          .
+        </p>
+      ) : !user ? (
+        <p>
+          <Link to="/login" navigate={navigate}>
+            Войдите
+          </Link>
+          , чтобы отправить сообщение.
+        </p>
+      ) : (
+        <form onSubmit={send}>
+          <label>
+            Ваше сообщение
+            <textarea
+              rows={7}
+              minLength={10}
+              maxLength={4000}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              required
+            />
+          </label>
+          <button disabled={busy} className="accent-button">
+            {busy ? "Отправляем…" : "Отправить автору"}
+          </button>
+        </form>
+      )}
+    </section>
+  );
+}
 createRoot(document.getElementById("root")).render(<App />);

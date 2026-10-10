@@ -1,4 +1,7 @@
 User-agent: *
 Allow: /
-
-Sitemap: /sitemap.xml
+Disallow: /author
+Disallow: /library
+Disallow: /login
+Disallow: /api/
+Sitemap: https://dark-archive.vercel.app/sitemap.xml
