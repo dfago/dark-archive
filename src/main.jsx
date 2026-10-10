@@ -12,6 +12,7 @@ import { starterArticles } from "./starter-articles.js";
 import { Link } from "./components/Link.jsx";
 import Reader from "./components/Reader.jsx";
 import Admin from "./components/Admin.jsx";
+import OwnerSetup from "./components/OwnerSetup.jsx";
 import "./styles.css";
 
 function legacyArticles() {
@@ -584,6 +585,17 @@ function App() {
                 navigate={navigate}
               />
             )}
+            {path === "/setup" && (
+              <OwnerSetup
+                online={online}
+                navigate={navigate}
+                onCreated={async (nextUser) => {
+                  await signedIn(nextUser);
+                  navigate("/author");
+                  notify("Кабинет автора создан. Можно добавлять истории.");
+                }}
+              />
+            )}
             {![
               "/",
               "/series",
@@ -591,6 +603,7 @@ function App() {
               "/login",
               "/author",
               "/feedback",
+              "/setup",
             ].includes(path) &&
               !path.startsWith("/story/") &&
               !seriesSlug && (

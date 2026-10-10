@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import {
   hashPassword,
   verifyPassword,
@@ -125,6 +125,8 @@ async function insertArticle(db, data, slug) {
 export function createHandler({
   getDatabase,
   siteURL = process.env.SITE_URL,
+  setupToken = process.env.OWNER_SETUP_TOKEN,
+  setupExpiresAt = process.env.OWNER_SETUP_EXPIRES_AT,
   secureCookies = Boolean(process.env.VERCEL) ||
     (siteURL
       ? new URL(siteURL).protocol === "https:"
@@ -161,7 +163,7 @@ export function createHandler({
           response.setHeader("Content-Type", "text/plain; charset=utf-8");
           response.statusCode = 200;
           return response.end(
-            `User-agent: *\nAllow: /\nDisallow: /author\nDisallow: /library\nDisallow: /login\nDisallow: /api/\nSitemap: ${origin}/sitemap.xml\n`,
+            `User-agent: *\nAllow: /\nDisallow: /author\nDisallow: /library\nDisallow: /login\nDisallow: /setup\nDisallow: /api/\nSitemap: ${origin}/sitemap.xml\n`,
           );
         }
         const { rows } = await db.query(
@@ -202,6 +204,84 @@ export function createHandler({
       const body = method !== "GET" ? await readBody(request) : {};
       if (!body || typeof body !== "object" || Array.isArray(body))
         throw httpError(400, "Ожидается объект данных.");
+
+      if (path === "/api/owner/setup") {
+        const deadline = Date.parse(setupExpiresAt || "");
+        const configured =
+          typeof setupToken === "string" &&
+          /^[a-f0-9]{64}$/.test(setupToken) &&
+          Number.isFinite(deadline) &&
+          deadline > Date.now();
+        const isComplete = async (connection) =>
+          (
+            await connection.query(
+              "SELECT 1 FROM owner_setup UNION ALL SELECT 1 FROM users WHERE role='admin' LIMIT 1",
+            )
+          ).rows.length > 0;
+        if (method === "GET")
+          return send(200, { enabled: configured && !(await isComplete(db)) });
+        if (method === "POST") {
+          if (!configured)
+            throw httpError(404, "Первоначальная настройка недоступна.");
+          const ip = process.env.VERCEL
+            ? String(request.headers["x-forwarded-for"] || "")
+                .split(",")[0]
+                .trim()
+            : request.socket?.remoteAddress || "local";
+          await rateLimit(db, `owner-setup:${ip}`, 10, 900);
+          if (
+            typeof body.token !== "string" ||
+            body.token.length > 128 ||
+            !timingSafeEqual(
+              Buffer.from(digest(body.token), "hex"),
+              Buffer.from(digest(setupToken), "hex"),
+            )
+          )
+            throw httpError(
+              403,
+              "Ссылка настройки неверна. Откройте личную ссылку настройки кабинета.",
+            );
+          const username = textField(
+            body.username,
+            "Логин",
+            3,
+            40,
+          ).toLowerCase();
+          if (!/^[a-zа-яё0-9_.-]+$/i.test(username))
+            throw httpError(
+              400,
+              "Логин: буквы, цифры, точка, дефис или подчёркивание.",
+            );
+          const name = textField(body.name || "Артём", "Имя", 2, 60);
+          const password = passwordField(body.password);
+          const passwordHash = await hashPassword(password);
+          const account = await db.transaction(async (tx) => {
+            if (db.postgres)
+              await tx.query("SELECT pg_advisory_xact_lock(19472027)");
+            if (await isComplete(tx))
+              throw httpError(
+                409,
+                "Кабинет автора уже настроен. Используйте обычный вход.",
+              );
+            const { rows } = await tx.query(
+              "INSERT INTO users (id,username,name,password_hash,role) VALUES ($1,$2,$3,$4,'admin') RETURNING id,username,name,role",
+              [randomUUID(), username, name, passwordHash],
+            );
+            await tx.query(
+              "INSERT INTO owner_setup (singleton,user_id) VALUES (TRUE,$1)",
+              [rows[0].id],
+            );
+            const oldToken = sessionToken(request);
+            if (oldToken)
+              await tx.query("DELETE FROM sessions WHERE token_hash=$1", [
+                digest(oldToken),
+              ]);
+            await createSession(tx, rows[0].id, response, secureCookies);
+            return rows[0];
+          });
+          return send(201, { user: publicUser(account) });
+        }
+      }
 
       if (path === "/api/session" && method === "GET")
         return send(200, { user });

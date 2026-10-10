@@ -61,43 +61,52 @@ export async function createDatabase({
 }
 
 export async function migrate(db) {
-  const sql = await readFile(
-    new URL("./migrations/001_initial.sql", import.meta.url),
-    "utf8",
+  const migrations = await Promise.all(
+    ["001_initial", "002_owner_setup"].map(async (name) => ({
+      version: name.slice(0, 3),
+      sql: await readFile(
+        new URL(`./migrations/${name}.sql`, import.meta.url),
+        "utf8",
+      ),
+    })),
   );
   await db.transaction(async (tx) => {
     if (db.postgres) await tx.query("SELECT pg_advisory_xact_lock(19472026)");
     await tx.query(
       "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
     );
-    const existing = await tx.query(
-      "SELECT version FROM schema_migrations WHERE version = $1",
-      ["001"],
-    );
-    if (existing.rows.length) return;
-    // Both drivers support individual statements; no interpolated user content.
-    for (const statement of sql
-      .split(";")
-      .map((s) => s.trim())
-      .filter(Boolean))
-      await tx.query(statement);
-    for (const article of starterArticles) {
-      await tx.query(
-        "INSERT INTO articles (id,title,slug,excerpt,cover,content,status,date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING",
-        [
-          article.id,
-          article.title,
-          article.slug,
-          article.excerpt,
-          article.cover,
-          article.content,
-          article.status,
-          article.date,
-        ],
+    for (const migration of migrations) {
+      const existing = await tx.query(
+        "SELECT version FROM schema_migrations WHERE version = $1",
+        [migration.version],
       );
+      if (existing.rows.length) continue;
+      // Both drivers support individual statements; no interpolated user content.
+      for (const statement of migration.sql
+        .split(";")
+        .map((s) => s.trim())
+        .filter(Boolean))
+        await tx.query(statement);
+      if (migration.version === "001") {
+        for (const article of starterArticles) {
+          await tx.query(
+            "INSERT INTO articles (id,title,slug,excerpt,cover,content,status,date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING",
+            [
+              article.id,
+              article.title,
+              article.slug,
+              article.excerpt,
+              article.cover,
+              article.content,
+              article.status,
+              article.date,
+            ],
+          );
+        }
+      }
+      await tx.query("INSERT INTO schema_migrations (version) VALUES ($1)", [
+        migration.version,
+      ]);
     }
-    await tx.query("INSERT INTO schema_migrations (version) VALUES ($1)", [
-      "001",
-    ]);
   });
 }
