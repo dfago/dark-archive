@@ -8,6 +8,25 @@ import {
 } from "../api.js";
 import { Link } from "./Link.jsx";
 
+function imageBlock(block) {
+  return block.match(/^!\[([^\]]*)\]\((https:\/\/[^\s)]+)\)$/);
+}
+
+function inlineLinks(text) {
+  return text
+    .split(/(\[[^\]\n]+\]\(https:\/\/[^\s)]+\))/g)
+    .map((part, index) => {
+      const link = part.match(/^\[([^\]\n]+)\]\((https:\/\/[^\s)]+)\)$/);
+      return link ? (
+        <a key={index} href={link[2]} target="_blank" rel="noopener noreferrer">
+          {link[1]}
+        </a>
+      ) : (
+        part
+      );
+    });
+}
+
 export default function Reader({
   slug,
   online,
@@ -230,6 +249,9 @@ export default function Reader({
       </section>
     );
   const { article, episodes, comments } = data;
+  const coverInContent = blocks.some(
+    (block) => imageBlock(block)?.[2] === article.cover,
+  );
   const index = episodes.findIndex((e) => e.id === article.id);
   return (
     <article className="article-page">
@@ -237,7 +259,7 @@ export default function Reader({
         ← Все истории
       </Link>
       <div className="article-shell">
-        {article.cover && (
+        {article.cover && !coverInContent && (
           <img className="article-cover" src={article.cover} alt="" />
         )}
         <div className="article-content">
@@ -288,9 +310,7 @@ export default function Reader({
           )}
           <div className="reader-text" ref={bodyRef} style={{ fontSize }}>
             {blocks.map((block, number) => {
-              const image = block.match(
-                /^!\[([^\]]*)\]\((https:\/\/[^\s)]+)\)$/,
-              );
+              const image = imageBlock(block);
               if (image)
                 return (
                   <figure data-paragraph={number} key={number}>
@@ -301,12 +321,12 @@ export default function Reader({
               if (block.startsWith("## "))
                 return (
                   <h2 data-paragraph={number} key={number}>
-                    {block.slice(3)}
+                    {inlineLinks(block.slice(3))}
                   </h2>
                 );
               return (
                 <p data-paragraph={number} key={number}>
-                  {block}
+                  {inlineLinks(block)}
                 </p>
               );
             })}
